@@ -150,6 +150,106 @@ jobs:
           name: test-results-macos
           path: build/tests/unit/test-results.xml
 
+  package-windows:
+    name: Installer (${{ matrix.arch }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+            msystem: MINGW64
+            pkg_prefix: mingw-w64-x86_64
+            installer_glob: tigervnc*.exe
+          - arch: arm64
+            runner: windows-11-arm
+            msystem: CLANGARM64
+            pkg_prefix: mingw-w64-clang-aarch64
+            installer_glob: tigervnc*.exe
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERBOSE: 1
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            ${{ matrix.pkg_prefix }}-toolchain
+            ${{ matrix.pkg_prefix }}-cmake
+            ${{ matrix.pkg_prefix }}-ninja
+            ${{ matrix.pkg_prefix }}-pkgconf
+            ${{ matrix.pkg_prefix }}-zlib
+            ${{ matrix.pkg_prefix }}-pixman
+            ${{ matrix.pkg_prefix }}-libjpeg-turbo
+            ${{ matrix.pkg_prefix }}-fltk1.3
+            ${{ matrix.pkg_prefix }}-gnutls
+            ${{ matrix.pkg_prefix }}-nettle
+      - name: Locate Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = Get-ChildItem `
+            'C:\Program Files (x86)\Inno Setup 6', `
+            'C:\Program Files\Inno Setup 6' `
+            -ErrorAction SilentlyContinue -Filter ISCC.exe -Recurse |
+            Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = Get-ChildItem `
+              'C:\Program Files (x86)\Inno Setup 6', `
+              'C:\Program Files\Inno Setup 6' `
+              -ErrorAction SilentlyContinue -Filter ISCC.exe -Recurse |
+              Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'ISCC.exe not found after install' }
+          Add-Content -Path $env:GITHUB_PATH -Value $iscc.Directory.FullName
+      - name: Configure
+        run: |
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_GNUTLS=ON \
+            -DENABLE_NETTLE=ON \
+            -DENABLE_NLS=OFF \
+            -DENABLE_H264=OFF \
+            -DBUILD_VIEWER=ON \
+            -S . -B build
+      - name: Build
+        run: cmake --build build
+      - name: Build installers
+        env:
+          MSYS2_PATH_TYPE: inherit
+        run: |
+          cmake --build build --target installer
+          cmake --build build --target winvnc_installer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tigervnc-windows-${{ matrix.arch }}
+          path: build/release/${{ matrix.installer_glob }}
+          if-no-files-found: error
+
+  release-windows:
+    name: Attach installers to release
+    needs: package-windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tigervnc-windows-*
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.exe
+          fail_on_unmatched_files: true
+
   build-java:
     runs-on: ubuntu-latest
     timeout-minutes: 5
