@@ -6,22 +6,68 @@ This document is the design rationale, the operator-facing description
 of what each backend does, and the manual test matrix that gates
 shipping a non-GDI default.
 
-## Status (phase 1)
+## Status
 
-The interface, factory, and three backend classes are in place. The
-runtime probe and logging are functional. **No backend's
-`captureNextFrame()` is wired into `SDisplay` yet** — the existing
+| Item | Phase 1 | Phase 2 (this PR) | Phase 3 |
+|---|---|---|---|
+| `CaptureBackend` interface | ✓ | — | — |
+| Factory + auto fallback | ✓ | — | — |
+| GDI marker (no real body) | ✓ | — | move BitBlt code in |
+| DXGI scaffold (probe + NotSupported) | ✓ | replaced by real body ✓ | — |
+| WGC scaffold (probe + NotSupported) | ✓ | unchanged | C++/WinRT body |
+| `enumerateMonitorsCommon()` (rect only) | ✓ | + DPI + rotation ✓ | — |
+| `coalesceRects()` helper + GTest | ✓ | — | — |
+| `CaptureBackend = ...` config knob | declared | wired to `core::EnumParameter` ✓ | SDisplay reads it |
+| SDisplay consumes the abstraction | — | — | yes |
+
+**`SDisplay` does not consume the new interface yet** — the existing
 GDI path in `SDisplay` / `DeviceFrameBuffer` continues to drive real
-capture. The `auto` factory walk currently lands on the GDI marker and
-SDisplay is unchanged.
+capture. Building and merging this PR changes nothing that an end user
+sees today; what changes is that a working DXGI implementation now
+exists alongside the GDI path and is one PR away from being switched
+on.
 
-Phase 2 will land:
+### What phase 2 lands
 
-1. The actual `IDXGIOutputDuplication` body inside `DxgiDesktopDuplicationBackend`.
-2. The `Windows.Graphics.Capture` (WinRT) body inside `WindowsGraphicsCaptureBackend`.
-3. Migration of the BitBlt code from `DeviceFrameBuffer` into `GdiCaptureBackend`.
-4. `SDisplay` consuming `CaptureBackend::captureNextFrame()` instead of
-   directly calling `DeviceFrameBuffer::grabRect()`.
+1. **Real `IDXGIOutputDuplication` body** in
+   `DxgiDesktopDuplicationBackend` (gated on `_WIN32_WINNT >= 0x0602`):
+   - `D3D11CreateDevice` with feature levels 11_1 → 10_0
+   - Adapter + output enumeration; monitor selection via
+     `MONITORINFOF_PRIMARY` for `-1`, by global index otherwise
+   - `IDXGIOutput1::DuplicateOutput`
+   - `AcquireNextFrame` / `ReleaseFrame` cycle with timeout
+   - `GetFrameDirtyRects` and `GetFrameMoveRects` parsed into
+     `FrameMeta::rects`
+   - `GetFramePointerShape` parsed into `FrameMeta::pointerShape`
+   - Whole-frame `CopyResource` into a `D3D11_USAGE_STAGING` texture
+     and CPU readback via `Map`
+   - `DXGI_ERROR_ACCESS_LOST` recovery path; `onDisplayChanged()` /
+     `onSessionChanged()` tear down for clean re-init.
+   On the legacy build profile the body compiles to the existing
+   scaffold returning `NotSupported`.
+2. **DPI + rotation** in `MonitorInfo`. `GetDpiForMonitor` is resolved
+   via `GetProcAddress` on `shcore.dll` so the legacy profile still
+   compiles. Rotation comes from `EnumDisplaySettingsExA` +
+   `dmDisplayOrientation`.
+3. **`CaptureBackend` `core::EnumParameter`** registered with the
+   global `Configuration` machinery. Setting it via CLI / config / the
+   Windows registry now changes the factory's selection. SDisplay
+   doesn't read it yet (phase 3).
+4. **`d3d11` / `dxgi` link libs** added to `rfb_win32`. Harmless on
+   legacy because no symbols are referenced.
+
+### Phase 3 (still open)
+
+1. Migrate `DeviceFrameBuffer::grabRect()` into
+   `GdiCaptureBackend::captureNextFrame()`.
+2. `SDisplay` constructs one `CaptureBackend` and consumes
+   `captureNextFrame()` per cycle, replacing direct
+   `DeviceFrameBuffer::grabRect()` calls.
+3. Real `Windows.Graphics.Capture` body via C++/WinRT. (Optional —
+   WGC is the right answer for *user-initiated* sharing, the wrong
+   answer for unattended winvnc service capture.)
+4. Manual test matrix coverage (single / multi monitor, DPI, rotation,
+   hotplug, sleep / resume, lock / unlock, RDP, ARM64).
 
 ## Backends
 
