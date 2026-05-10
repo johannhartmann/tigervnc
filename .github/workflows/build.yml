@@ -169,13 +169,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pin runners explicitly so behaviour doesn't drift the day GitHub
+          # flips windows-latest to a future LTSC. windows-2025 = Windows
+          # Server 2025; windows-11-arm = Windows 11 ARM64.
           - arch: x86_64
-            runner: windows-latest
+            runner: windows-2025
+            os_label: windows
             msystem: MINGW64
             pkg_prefix: mingw-w64-x86_64
             installer_glob: tigervnc*.exe
           - arch: arm64
             runner: windows-11-arm
+            os_label: windows
             msystem: CLANGARM64
             pkg_prefix: mingw-w64-clang-aarch64
             installer_glob: tigervnc*.exe
@@ -222,6 +227,7 @@ jobs:
           if (-not $iscc) { throw 'ISCC.exe not found after install' }
           Add-Content -Path $env:GITHUB_PATH -Value $iscc.Directory.FullName
       - name: Configure
+        id: configure
         run: |
           cmake -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -231,6 +237,10 @@ jobs:
             -DENABLE_H264=ON \
             -DBUILD_VIEWER=ON \
             -S . -B build
+          # Read VERSION from CMakeLists.txt for the artifact name. Avoids
+          # reaching into CMakeCache.txt and stays robust to layout changes.
+          version=$(awk -F'[() ]+' '/^set\(VERSION/ {print $3; exit}' CMakeLists.txt)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build
         run: cmake --build build
       - name: Build installers
@@ -241,7 +251,9 @@ jobs:
           cmake --build build --target winvnc_installer
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: tigervnc-windows-${{ matrix.arch }}
+          # tigervnc-<version>-windows-<arch> -- fully qualified so a single
+          # artifact bucket can hold every supported target.
+          name: tigervnc-${{ steps.configure.outputs.version }}-${{ matrix.os_label }}-${{ matrix.arch }}
           path: build/release/${{ matrix.installer_glob }}
           if-no-files-found: error
 
@@ -255,7 +267,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
-          pattern: tigervnc-windows-*
+          # Match tigervnc-<version>-windows-<arch>; the version field is
+          # glob-expanded so this stays decoupled from the version string.
+          pattern: tigervnc-*-windows-*
           path: artifacts
           merge-multiple: true
       - name: Compute SHA256SUMS
