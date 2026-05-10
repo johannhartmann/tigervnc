@@ -2,6 +2,17 @@ name: Build
 
 on: [push, pull_request]
 
+# Cancel an older run on the same ref when a new commit arrives. Tag refs are
+# immutable so the only thing this affects in practice is push / PR runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default the GITHUB_TOKEN scope to read-only. The release-windows job opts
+# back into contents: write where it actually needs it.
+permissions:
+  contents: read
+
 jobs:
   build-linux:
     runs-on: ubuntu-latest
@@ -64,6 +75,7 @@ jobs:
       - uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c  # v2.9.0
         with:
           update: true
+          cache: true
       - name: Install dependencies
         run: |
           pacman --sync --noconfirm --needed \
@@ -179,6 +191,7 @@ jobs:
         with:
           msystem: ${{ matrix.msystem }}
           update: true
+          cache: true
           install: >-
             ${{ matrix.pkg_prefix }}-toolchain
             ${{ matrix.pkg_prefix }}-cmake
@@ -215,7 +228,7 @@ jobs:
             -DENABLE_GNUTLS=ON \
             -DENABLE_NETTLE=ON \
             -DENABLE_NLS=OFF \
-            -DENABLE_H264=OFF \
+            -DENABLE_H264=ON \
             -DBUILD_VIEWER=ON \
             -S . -B build
       - name: Build
@@ -245,9 +258,15 @@ jobs:
           pattern: tigervnc-windows-*
           path: artifacts
           merge-multiple: true
+      - name: Compute SHA256SUMS
+        working-directory: artifacts
+        run: |
+          sha256sum *.exe | tee SHA256SUMS
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
-          files: artifacts/*.exe
+          files: |
+            artifacts/*.exe
+            artifacts/SHA256SUMS
           fail_on_unmatched_files: true
 
   build-java:

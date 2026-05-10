@@ -6,9 +6,19 @@ on:
     types:
       - completed
 
+permissions:
+  contents: read
+
 jobs:
   report:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # dorny/test-reporter creates GitHub Check runs from the JUnit XML it
+      # downloads, so it needs checks:write. actions:read is for downloading
+      # the test-results-* artifacts of the originating workflow run.
+      checks: write
+      actions: read
     steps:
       - uses: dorny/test-reporter@4a2e97665d5fa767581ef38eca97b9694bd4eef4  # v2.7.0
         with:

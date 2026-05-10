@@ -5,6 +5,8 @@ ArchitecturesInstallIn64BitMode=arm64
 #elif defined(WIN64)
 ArchitecturesInstallIn64BitMode=x64
 #endif
+; Stable GUID so future renames or AppName changes still upgrade in place.
+AppId={{E9ABE0AB-B4E2-4CC9-BFF0-7A104050B65B}
 AppName=TigerVNC server
 AppVerName=TigerVNC server v@VERSION@ (@BUILD@)
 AppVersion=@VERSION@
