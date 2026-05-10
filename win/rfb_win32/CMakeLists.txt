@@ -1,5 +1,9 @@
 add_library(rfb_win32 STATIC
   AboutDialog.cxx
+  CaptureBackend.cxx
+  CaptureBackendDxgi.cxx
+  CaptureBackendGdi.cxx
+  CaptureBackendWgc.cxx
   Clipboard.cxx
   CurrentUser.cxx
   DeviceContext.cxx
@@ -35,3 +39,7 @@ if(BUILD_WINVNC)
 endif()
 
 target_link_libraries(rfb_win32 user32.lib comctl32.lib wtsapi32.lib version.lib)
+# DXGI Desktop Duplication backend (D3D11 + DXGI 1.2 + shcore for
+# GetDpiForMonitor). All three are present in every MinGW / MSYS2
+# toolchain that targets Windows.
+target_link_libraries(rfb_win32 d3d11 dxgi shcore)
