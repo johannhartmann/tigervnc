@@ -1,5 +1,8 @@
 [Setup]
-#ifdef WIN64
+#ifdef WINARM64
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#elif defined(WIN64)
 ArchitecturesInstallIn64BitMode=x64
 #endif
 AppName=TigerVNC server
@@ -7,7 +10,7 @@ AppVerName=TigerVNC server v@VERSION@ (@BUILD@)
 AppVersion=@VERSION@
 AppPublisher=TigerVNC team
 AppPublisherURL=https://tigervnc.org
-DefaultDirName={pf}\TigerVNC server
+DefaultDirName={autopf}\TigerVNC server
 DefaultGroupName=TigerVNC server
 LicenseFile=@CMAKE_SOURCE_DIR@\LICENCE.TXT
 
@@ -19,9 +22,12 @@ Name: "{sys}\config\systemprofile\Desktop"
 [Files]
 Source: "@CMAKE_BINARY_DIR@\win\winvnc\winvnc4.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace; 
 Source: "@CMAKE_BINARY_DIR@\win\wm_hooks\wm_hooks.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace; 
-Source: "@CMAKE_BINARY_DIR@\win\vncconfig\vncconfig.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace; 
+Source: "@CMAKE_BINARY_DIR@\win\vncconfig\vncconfig.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace;
 Source: "@CMAKE_SOURCE_DIR@\README.rst"; DestDir: "{app}"; Flags: ignoreversion
 Source: "@CMAKE_SOURCE_DIR@\LICENCE.TXT"; DestDir: "{app}"; Flags: ignoreversion
+; Auto-generated list of MinGW/MSYS2 runtime DLLs the server was linked
+; against. Empty for fully static builds.
+#include "winvnc-runtime-deps.iss"
 
 
 [Icons]

@@ -1,5 +1,8 @@
 [Setup]
-#ifdef WIN64
+#ifdef WINARM64
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#elif defined(WIN64)
 ArchitecturesInstallIn64BitMode=x64
 #endif
 AppName=TigerVNC
@@ -7,15 +10,22 @@ AppVerName=TigerVNC @VERSION@ (@BUILD@)
 AppVersion=@VERSION@
 AppPublisher=TigerVNC team
 AppPublisherURL=https://tigervnc.org
-DefaultDirName={pf}\TigerVNC
+DefaultDirName={autopf}\TigerVNC
 DefaultGroupName=TigerVNC
 LicenseFile=@CMAKE_SOURCE_DIR@\LICENCE.TXT
 
 [Files]
-Source: "@CMAKE_BINARY_DIR@\vncviewer\vncviewer.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace; 
+Source: "@CMAKE_BINARY_DIR@\vncviewer\vncviewer.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace;
 Source: "@CMAKE_SOURCE_DIR@\README.rst"; DestDir: "{app}"; Flags: ignoreversion
 Source: "@CMAKE_SOURCE_DIR@\LICENCE.TXT"; DestDir: "{app}"; Flags: ignoreversion
+; Auto-generated list of MinGW/MSYS2 runtime DLLs the viewer was linked
+; against. Empty for fully static builds.
+#include "tigervnc-runtime-deps.iss"
 
+; Translation .mo files are only emitted when ENABLE_NLS is on. The build
+; system passes -DWITH_NLS in that case; otherwise we skip the whole loop so
+; the installer compiles for NLS-disabled builds too.
+#ifdef WITH_NLS
 #define LINGUAS
 #define Lang
 #sub AddLanguage
@@ -23,6 +33,7 @@ Source: "@CMAKE_SOURCE_DIR@\LICENCE.TXT"; DestDir: "{app}"; Flags: ignoreversion
   Source: "@CMAKE_BINARY_DIR@\po\{#Lang}.mo"; DestDir: "{app}\locale\{#Lang}\LC_MESSAGES"; DestName: "tigervnc.mo"; Flags: ignoreversion
 #endsub
 #for {LINGUAS = FileOpen("@CMAKE_SOURCE_DIR@\po\LINGUAS"); !FileEof(LINGUAS); ""} AddLanguage
+#endif
 
 [Icons]
 Name: "{group}\TigerVNC"; FileName: "{app}\vncviewer.exe";
