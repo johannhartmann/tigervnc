@@ -48,3 +48,7 @@ add_executable(emulatemb emulatemb.cxx ../../vncviewer/EmulateMB.cxx)
 target_include_directories(emulatemb SYSTEM PUBLIC ${Intl_INCLUDE_DIR})
 target_link_libraries(emulatemb core ${Intl_LIBRARIES} GTest::gtest_main)
 gtest_discover_tests(emulatemb)
+
+add_executable(capturerectcoalesce capturerectcoalesce.cxx)
+target_link_libraries(capturerectcoalesce rfb GTest::gtest_main)
+gtest_discover_tests(capturerectcoalesce)
