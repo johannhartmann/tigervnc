@@ -20,6 +20,8 @@
 #ifndef __RFB_ENCODEMANAGER_H__
 #define __RFB_ENCODEMANAGER_H__
 
+#include <chrono>
+#include <deque>
 #include <vector>
 
 #include <stdint.h>
@@ -53,6 +55,11 @@ namespace rfb {
     // "Custom" (default) leaves existing behaviour untouched. See
     // doc/encoding-policy.md.
     static core::EnumParameter encodingPreset;
+
+    // Log the adaptive-policy diagnostics summary every N frames (0
+    // disables mid-connection logging; the summary still appears once
+    // at connection close via logStats()).
+    static core::IntParameter policyLogInterval;
 
     // Hack to let ConnParams calculate the client's preferred encoding
     static bool supported(int encoding);
@@ -151,6 +158,25 @@ namespace rfb {
     StatsVector stats;
     int activeType;
     int beforeLength;
+
+    // Per-rectangle accounting populated by startRect()/endRect() and
+    // consumed by writeSubRect()'s diagnostic block. Decoupled from
+    // the existing stats[][] aggregation because Diagnostics records
+    // per-encoder-kind, not per-(class,type).
+    std::chrono::steady_clock::time_point rectStartTime;
+    int lastRectBytes;
+    uint64_t lastRectEncodeUs;
+
+    // Connection-wide recent change rate. Updated once per writeUpdate()
+    // -- one frame batch == one "tick", windowed over the last second.
+    // Cheap proxy for "is this a busy / video connection?" that the
+    // EncodingPolicy uses to gate the H.264 recommendation.
+    std::deque<uint64_t> recentUpdateTimesMs;
+    int currentChangeFps;
+
+    // Frames seen since the last mid-connection policy summary. Reset
+    // when the summary is logged.
+    unsigned framesSinceLastPolicyLog;
 
     // Adaptive-policy diagnostics. Populated per rectangle in
     // writeSubRect(); summarised by logStats(). Per-instance, not

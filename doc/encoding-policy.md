@@ -18,7 +18,10 @@ the **diagnostics** that surface what the server actually picked.
 | `core::EnumParameter "EncodingPreset"` registered with global Configuration | ✓ |
 | `EncodeManager` consumes the policy per rectangle (observational) | ✓ |
 | `EncodeManager` applies preset's quality / compression to existing classic encoders | ✓ |
-| Periodic diagnostics summary in `EncodeManager::logStats()` | ✓ |
+| `Diagnostics::bytes` and `encodeTimeUs` populated per rect | ✓ |
+| Connection-wide `recentChangeFps` derivation feeds the H.264 gate | ✓ |
+| Periodic mid-connection summary via `PolicyLogInterval` | ✓ |
+| Closing summary in `EncodeManager::logStats()` | ✓ |
 | Server-side **H.264 encoder** | not yet implemented |
 
 The framework is now end-to-end wired. The policy runs per rectangle,
@@ -113,6 +116,8 @@ The policy's heuristic captures this via three thresholds:
 ```
 -EncodingPreset Balanced     # one of LANCrisp Balanced LowBandwidth
                              # VideoOptimized Custom (default)
+-PolicyLogInterval 500       # emit mid-connection diagnostics every N
+                             # frames; 0 disables (default 500 frames)
 ```
 
 The preset is a `core::EnumParameter`, picked up via the standard
@@ -170,23 +175,19 @@ log volume low.
 
 ## Follow-up work (not in this PR)
 
-1. **Server-side H.264 encoder**: `H264Encoder` + `H264WinEncoderContext`
-   (Media Foundation H.264 encoder, separate from the existing
-   decoder) + libav encoder fallback for Linux/Mac, BGRA → NV12 colour
-   conversion, frame submission, GOP / keyframe handling, bitrate
-   control. Once this lands, `prepareEncoders()` can route to
-   `H264Encoder` when the policy recommends H.264, and the
-   `fallbacks` counter should drop to zero on those workloads.
-2. **Recent-change-rate signal** in `RectStats::recentChangeFps`. The
-   policy currently consumes 0 because `writeSubRect()` doesn't yet
-   compute it -- it would derive cleanly from the existing
-   `recentlyChangedRegion` ring + a small per-region timestamp ring
-   buffer. Worthwhile only once H.264 actually fires the recommendation.
-3. **Per-frame timing in `Diagnostics`**. The struct has slots for
-   `bytes` and `encodeTimeUs` per encoder; today they stay 0 because
-   the hook in `writeSubRect()` runs after `endRect()` and doesn't
-   capture either. A small refactor to surface them is straightforward.
-4. **Periodic diagnostics log** during a long-lived connection. Today
-   the summary appears at connection close via `logStats()`; a sampled
-   info-level line every N frames (or every M seconds) would help
-   live-tuning sessions.
+The remaining gap is the big one:
+
+1. **Server-side H.264 encoder.** `H264Encoder` class implementing
+   the `Encoder` interface + `H264WinEncoderContext` (Media Foundation
+   H.264 encoder, separate from the existing decoder) + libav encoder
+   fallback for Linux/Mac, BGRA → NV12 colour conversion, frame
+   submission, GOP / keyframe / bitrate control, lifecycle integration
+   with `EncodeManager`. Once this lands, `prepareEncoders()` will
+   route to `H264Encoder` when the policy recommends H.264 and the
+   `fallbacks` counter should drop to zero on workloads where the
+   policy chose H.264. Multi-PR effort comparable to the DXGI capture
+   work already merged.
+
+The other three follow-ups (recent-change-rate signal, per-frame
+timing in Diagnostics, periodic mid-connection log) all landed in
+this PR.
