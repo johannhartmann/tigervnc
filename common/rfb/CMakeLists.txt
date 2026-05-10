@@ -5,6 +5,7 @@ add_library(rfb STATIC
   CConnection.cxx
   CMsgReader.cxx
   CMsgWriter.cxx
+  CaptureRectCoalesce.cxx
   CSecurityPlain.cxx
   CSecurityStack.cxx
   CSecurityVeNCrypt.cxx
