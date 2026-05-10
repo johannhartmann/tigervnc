@@ -24,9 +24,11 @@
 
 #include <stdint.h>
 
+#include <core/Configuration.h>
 #include <core/Region.h>
 #include <core/Timer.h>
 
+#include <rfb/EncodingPolicy.h>
 #include <rfb/PixelBuffer.h>
 
 namespace rfb {
@@ -45,6 +47,12 @@ namespace rfb {
     ~EncodeManager();
 
     void logStats();
+
+    // Operator-facing knob. Selects an adaptive encoding preset that
+    // tunes JPEG quality / compression level / (future) H.264 enable.
+    // "Custom" (default) leaves existing behaviour untouched. See
+    // doc/encoding-policy.md.
+    static core::EnumParameter encodingPreset;
 
     // Hack to let ConnParams calculate the client's preferred encoding
     static bool supported(int encoding);
@@ -143,6 +151,11 @@ namespace rfb {
     StatsVector stats;
     int activeType;
     int beforeLength;
+
+    // Adaptive-policy diagnostics. Populated per rectangle in
+    // writeSubRect(); summarised by logStats(). Per-instance, not
+    // thread-safe (matches the per-connection EncodeManager model).
+    encoding::Diagnostics encodingDiag;
 
     class OffsetPixelBuffer : public FullFramePixelBuffer {
     public:

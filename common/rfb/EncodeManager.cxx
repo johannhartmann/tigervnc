@@ -31,6 +31,7 @@
 #include <rfb/Cursor.h>
 #include <rfb/EncodeManager.h>
 #include <rfb/Encoder.h>
+#include <rfb/EncodingPolicy.h>
 #include <rfb/Palette.h>
 #include <rfb/SConnection.h>
 #include <rfb/SMsgWriter.h>
@@ -48,6 +49,21 @@
 using namespace rfb;
 
 static core::LogWriter vlog("EncodeManager");
+
+// Operator-facing adaptive encoding preset. "Custom" (default) is the
+// "leave existing behaviour alone" sentinel. Setting any other value
+// causes prepareEncoders() to override the per-connection quality /
+// compression knobs from the preset's tuning, and writeSubRect() to
+// record what the policy would have picked into encodingDiag.
+core::EnumParameter EncodeManager::encodingPreset(
+  "EncodingPreset",
+  "Adaptive encoding policy preset (LANCrisp, Balanced, LowBandwidth, "
+  "VideoOptimized, Custom). Custom keeps the existing per-connection "
+  "quality/compression knobs unchanged; the other presets override "
+  "them with values tuned for that workload. See "
+  "doc/encoding-policy.md for the tuning table and the H.264 status.",
+  {"LANCrisp", "Balanced", "LowBandwidth", "VideoOptimized", "Custom"},
+  "Custom");
 
 // Split each rectangle into smaller ones no larger than this area,
 // and no wider than this width.
@@ -157,6 +173,7 @@ EncodeManager::EncodeManager(SConnection* conn_)
 
   updates = 0;
   memset(&copyStats, 0, sizeof(copyStats));
+  encoding::resetDiagnostics(&encodingDiag);
   stats.resize(encoderClassMax);
   for (iter = stats.begin();iter != stats.end();++iter) {
     StatsVector::value_type::iterator iter2;
@@ -244,6 +261,14 @@ void EncodeManager::logStats()
             core::siPrefix(pixels, "pixels").c_str());
   vlog.info("         %s (1:%g ratio)",
             core::iecPrefix(bytes, "B").c_str(), ratio);
+
+  // Adaptive-policy summary. Always logged so an operator can see what
+  // the policy *would* have picked even when no preset is active.
+  if (encodingDiag.totalFrames > 0) {
+    vlog.info("  Policy: %s (preset=%s)",
+              encoding::diagnosticsSummary(encodingDiag).c_str(),
+              encodingPreset.getValueStr().c_str());
+  }
 }
 
 bool EncodeManager::supported(int encoding)
@@ -389,6 +414,25 @@ void EncodeManager::prepareEncoders(bool allowLossy)
   int32_t preferred;
 
   std::vector<int>::iterator iter;
+
+  // If the operator picked a non-Custom preset, override the per-
+  // connection quality / compression knobs. Custom (default) keeps
+  // whatever the client requested via SetEncodings.
+  encoding::Preset preset = encoding::Preset::Custom;
+  encoding::parsePreset(encodingPreset.getValueStr().c_str(), &preset);
+  if (preset != encoding::Preset::Custom) {
+    encoding::PresetTuning t = encoding::tuningFor(preset);
+    // tuningFor stores JPEG quality on a 0..100 scale; ClientParams
+    // uses 0..9. Rescale via floor(q/10) clamped to [0,9].
+    int q9 = t.jpegQuality / 10;
+    if (q9 < 0) q9 = 0;
+    if (q9 > 9) q9 = 9;
+    int c9 = t.tightCompression;
+    if (c9 < 0) c9 = 0;
+    if (c9 > 9) c9 = 9;
+    conn->client.qualityLevel  = q9;
+    conn->client.compressLevel = c9;
+  }
 
   solid = bitmap = bitmapRLE = encoderRaw;
   indexed = indexedRLE = fullColour = encoderRaw;
@@ -944,6 +988,55 @@ void EncodeManager::writeSubRect(const core::Rect& rect,
   encoder->writeRect(ppb, info.palette);
 
   endRect();
+
+  // Adaptive-policy diagnostics. Observational only -- the EncoderClass
+  // we just used was picked by the existing heuristic above; we ask the
+  // policy what it would have picked given the same rect, and record
+  // both the actual usage and any "wanted H.264, fell back" event so
+  // logStats() can surface it later.
+  {
+    encoding::Preset preset = encoding::Preset::Custom;
+    encoding::parsePreset(encodingPreset.getValueStr().c_str(), &preset);
+
+    // Local name avoids shadowing EncodeManager::stats (StatsVector).
+    encoding::RectStats rectStats{};
+    rectStats.width        = rect.width();
+    rectStats.height       = rect.height();
+    // info.palette.size() is 0 for full-colour rects; we map that to a
+    // sentinel above the policy's "indexed" thresholds.
+    rectStats.paletteSize  = info.palette.size() == 0
+                                ? 257
+                                : (int)info.palette.size();
+    rectStats.hasGradient  = (type == encoderFullColour);
+    rectStats.recentChangeFps = 0;  // TODO: derive from recentlyChangedRegion
+
+    encoding::ClientCaps caps{};
+    caps.supportsH264      = conn->client.supportsEncoding(encodingH264);
+    caps.supportsTight     = conn->client.supportsEncoding(encodingTight);
+    caps.supportsTightJPEG = caps.supportsTight;
+    caps.supportsZRLE      = conn->client.supportsEncoding(encodingZRLE);
+    caps.supportsHextile   = conn->client.supportsEncoding(encodingHextile);
+
+    encoding::RecommendedEncoder rec =
+        encoding::pickEncoder(preset, rectStats, caps);
+
+    encoding::RecommendedEncoder used = encoding::RecommendedEncoder::Auto;
+    switch (activeEncoders[type]) {
+      case encoderRaw:       used = encoding::RecommendedEncoder::Raw;       break;
+      case encoderHextile:   used = encoding::RecommendedEncoder::Hextile;   break;
+      case encoderTight:     used = encoding::RecommendedEncoder::Tight;     break;
+      case encoderTightJPEG:
+      case encoderJPEG:      used = encoding::RecommendedEncoder::TightJPEG; break;
+      case encoderZRLE:      used = encoding::RecommendedEncoder::ZRLE;      break;
+      default:               used = encoding::RecommendedEncoder::Auto;      break;
+    }
+    encoding::recordFrame(&encodingDiag, used, /*bytes=*/0,
+                          /*encodeTimeUs=*/0);
+    if (rec == encoding::RecommendedEncoder::H264 &&
+        used != encoding::RecommendedEncoder::H264) {
+      encoding::recordFallback(&encodingDiag, rec, used);
+    }
+  }
 }
 
 bool EncodeManager::checkSolidTile(const core::Rect& r,

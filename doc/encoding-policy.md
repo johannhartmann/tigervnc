@@ -15,13 +15,19 @@ the **diagnostics** that surface what the server actually picked.
 | `Preset` enum + `tuningFor()` (LANCrisp / Balanced / LowBandwidth / VideoOptimized / Custom) | ✓ |
 | `Diagnostics` counters and `diagnosticsSummary()` | ✓ |
 | GTest coverage of the decision logic | ✓ (17 cases) |
+| `core::EnumParameter "EncodingPreset"` registered with global Configuration | ✓ |
+| `EncodeManager` consumes the policy per rectangle (observational) | ✓ |
+| `EncodeManager` applies preset's quality / compression to existing classic encoders | ✓ |
+| Periodic diagnostics summary in `EncodeManager::logStats()` | ✓ |
 | Server-side **H.264 encoder** | not yet implemented |
-| `EncodeManager` consumes the policy | follow-up |
-| `core::EnumParameter` wired into the global config so operators can pick a preset | follow-up |
 
-The policy is a strictly additive module: it computes a recommendation
-but `EncodeManager` does not yet route through it. That's the
-follow-up that turns the framework into runtime behaviour.
+The framework is now end-to-end wired. The policy runs per rectangle,
+the existing classic encoders honour preset quality / compression
+overrides, and `logStats()` surfaces the counters at connection close
+(or whenever it's invoked). The H.264 branch of the policy still
+results in a fallback to TightJPEG because no server-side H.264
+encoder exists yet -- that's the only remaining gap before
+`fallbacks=0` is achievable on workloads where the policy chose H.264.
 
 ## H.264, honestly
 
@@ -102,21 +108,29 @@ The policy's heuristic captures this via three thresholds:
   with VideoOptimized + a capable client + a large rect, a still
   frame falls back to TightJPEG.
 
-## Configuration (planned)
-
-Until the follow-up that wires `EncodeManager`, none of these knobs
-take effect. Listed here so the eventual surface is documented:
+## Configuration
 
 ```
 -EncodingPreset Balanced     # one of LANCrisp Balanced LowBandwidth
-                             # VideoOptimized Custom
+                             # VideoOptimized Custom (default)
 ```
 
-The preset selection will be a `core::EnumParameter`, picked up via
-the standard Configuration plumbing (CLI, config file, registry on
-Windows). `Custom` is the escape hatch for operators who want to set
-the underlying knobs directly (`-CompressionLevel`, `-JpegQuality`,
-etc.) without the preset overriding them.
+The preset is a `core::EnumParameter`, picked up via the standard
+Configuration plumbing (CLI, config file, Windows registry). `Custom`
+is the default and the escape hatch: operators who want to set the
+underlying knobs directly (`-CompressionLevel`, `-JpegQuality`, etc.)
+get exactly the historical behaviour with no preset interference.
+
+Setting any other value causes `prepareEncoders()` to override the
+per-connection `qualityLevel` and `compressLevel` from the preset's
+tuning. The override is recomputed on every prepareEncoders() call so
+runtime preset changes take effect without restarting the server.
+
+JPEG quality in `tuningFor()` is on a 0..100 scale (the natural one
+for `TightJPEG` / `JPEG`). `ClientParams::qualityLevel` is on a 0..9
+scale; `prepareEncoders()` rescales by floor(q/10) and clamps to
+[0, 9]. So `LANCrisp`'s 92 maps to `qualityLevel = 9`, `Balanced`'s
+75 → 7, `LowBandwidth`'s 45 → 4, `VideoOptimized`'s 70 → 7.
 
 ## Diagnostics
 
@@ -156,17 +170,23 @@ log volume low.
 
 ## Follow-up work (not in this PR)
 
-1. Wire `EncodeManager` to call `pickEncoder()` per rectangle and
-   record the recommendation in a per-connection `Diagnostics`. Until
-   the H.264 encoder lands, the recommendation is observational; if
-   the policy says "H.264", a `recordFallback()` is logged and the
-   existing heuristic is used.
-2. Wire a `core::EnumParameter "EncodingPreset"` to `tuningFor()`,
-   and have `EncodeManager` apply the preset's quality / compression
-   numbers to its existing knobs.
-3. Implement the **server-side H.264 encoder**: `H264Encoder` +
-   `H264WinEncoderContext` (Media Foundation) + libav encoder for
-   Linux/Mac, BGRA → NV12, frame submission, GOP / keyframe handling,
-   bitrate control.
-4. Surface `Diagnostics` via a per-connection log line every N frames,
-   and (optionally) via a small admin-facing JSON dump.
+1. **Server-side H.264 encoder**: `H264Encoder` + `H264WinEncoderContext`
+   (Media Foundation H.264 encoder, separate from the existing
+   decoder) + libav encoder fallback for Linux/Mac, BGRA → NV12 colour
+   conversion, frame submission, GOP / keyframe handling, bitrate
+   control. Once this lands, `prepareEncoders()` can route to
+   `H264Encoder` when the policy recommends H.264, and the
+   `fallbacks` counter should drop to zero on those workloads.
+2. **Recent-change-rate signal** in `RectStats::recentChangeFps`. The
+   policy currently consumes 0 because `writeSubRect()` doesn't yet
+   compute it -- it would derive cleanly from the existing
+   `recentlyChangedRegion` ring + a small per-region timestamp ring
+   buffer. Worthwhile only once H.264 actually fires the recommendation.
+3. **Per-frame timing in `Diagnostics`**. The struct has slots for
+   `bytes` and `encodeTimeUs` per encoder; today they stay 0 because
+   the hook in `writeSubRect()` runs after `endRect()` and doesn't
+   capture either. A small refactor to surface them is straightforward.
+4. **Periodic diagnostics log** during a long-lived connection. Today
+   the summary appears at connection close via `logStats()`; a sampled
+   info-level line every N frames (or every M seconds) would help
+   live-tuning sessions.
