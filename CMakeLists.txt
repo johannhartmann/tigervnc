@@ -119,9 +119,13 @@ if(UNIX)
   link_libraries(pthread)
 endif()
 
-# Minimum version is Windows 7
+# Target Windows 10 (1507) and later -- the baseline for modern x64
+# Windows (Win 10 / 11, Server 2016/2019/2022/2025) and the only profile
+# that ARM64 Windows ships in. Drops the historical Win 7 / Server 2008 R2
+# baseline; downstreams that need pre-Win10 support should fork.
 if(WIN32)
-  add_definitions(-D_WIN32_WINNT=0x0601)
+  add_definitions(-D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
+                  -DNTDDI_VERSION=0x0A000000)
 endif()
 
 # Legacy macros (macOS 10.12 and older) conflict with our code

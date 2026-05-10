@@ -5,6 +5,9 @@ ArchitecturesInstallIn64BitMode=arm64
 #elif defined(WIN64)
 ArchitecturesInstallIn64BitMode=x64
 #endif
+; TigerVNC targets Windows 10 (1507) and later, matching the build's
+; _WIN32_WINNT baseline. The installer refuses to run on Win 8.1 or older.
+MinVersion=10.0
 ; Stable GUID so future renames or AppName changes still upgrade in place.
 AppId={{E9ABE0AB-B4E2-4CC9-BFF0-7A104050B65B}
 AppName=TigerVNC server
