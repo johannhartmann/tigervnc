@@ -22,12 +22,16 @@
 #include <config.h>
 #endif
 
+#include <stdlib.h>
 #include <string.h>
+
+#include <string>
 
 #include <winvnc/VNCServerWin32.h>
 #include <winvnc/VNCServerService.h>
 #include <winvnc/AddNewClientDialog.h>
 
+#include <core/Configuration.h>
 #include <core/Logger_file.h>
 #include <core/Logger_stdio.h>
 #include <core/LogWriter.h>
@@ -46,6 +50,33 @@ using namespace win32;
 static LogWriter vlog("main");
 
 const char* rfb::win32::AppName = "TigerVNC Server";
+
+// Operator-facing knob for the file logger destination. Empty (default)
+// resolves to ${TMP|TEMP|USERPROFILE}\WinVNC4.log; absolute paths are
+// honoured as-is. Routing to this file still requires "-Log *:file:N"
+// (or registry equivalent); the parameter only controls *where* the
+// file destination writes.
+static StringParameter logFile(
+  "LogFile",
+  "Path of the file the \"file\" log destination writes to. Empty "
+  "selects ${TMP|TEMP|USERPROFILE}\\WinVNC4.log. The path is honoured "
+  "only when -Log routes output to the file destination.",
+  "");
+
+static std::string defaultLogFilePath() {
+  const char* tmp = getenv("TMP");
+  if (tmp == nullptr || *tmp == '\0') tmp = getenv("TEMP");
+  if (tmp == nullptr || *tmp == '\0') tmp = getenv("USERPROFILE");
+  if (tmp == nullptr || *tmp == '\0') tmp = "C:\\temp";
+  return core::format("%s\\WinVNC4.log", tmp);
+}
+
+static std::string resolveLogFilePath() {
+  std::string requested = (const char*)logFile;
+  if (requested.empty())
+    return defaultLogFilePath();
+  return requested;
+}
 
 
 extern bool runAsService;
@@ -246,6 +277,11 @@ int WINAPI WinMain(HINSTANCE /*inst*/, HINSTANCE /*prevInst*/, char* /*cmdLine*/
   try {
     // - Initialise the available loggers
     //freopen("\\\\drupe\\tjr\\WinVNC4.log","ab",stderr);
+    //
+    // The file destination is bootstrapped with the default path here so
+    // any messages emitted during command-line parsing have somewhere to
+    // go. After processParams() runs we re-init with whatever -LogFile
+    // (or registry) supplied; calling initFileLogger() twice is safe.
 #ifdef _DEBUG
     AllocConsole();
 	freopen("CONIN$", "rb", stdin);
@@ -253,16 +289,16 @@ int WINAPI WinMain(HINSTANCE /*inst*/, HINSTANCE /*prevInst*/, char* /*cmdLine*/
 	freopen("CONOUT$", "wb", stderr);
     setbuf(stderr, nullptr);
 	initStdIOLoggers();
-	initFileLogger("C:\\temp\\WinVNC4.log");
+	initFileLogger(defaultLogFilePath().c_str());
 	logParams.setParam("*:stderr:100");
 #else
-    initFileLogger("C:\\temp\\WinVNC4.log");
+    initFileLogger(defaultLogFilePath().c_str());
 	logParams.setParam("*:stderr:0");
 #endif
     rfb::win32::initEventLogLogger(VNCServerService::Name);
 
     // - By default, just log errors to stderr
-    
+
 
     // - Print program details and process the command line
     programInfo();
@@ -270,6 +306,15 @@ int WINAPI WinMain(HINSTANCE /*inst*/, HINSTANCE /*prevInst*/, char* /*cmdLine*/
 	int argc = __argc;
 	char **argv = __argv;
     processParams(argc, argv);
+
+    // Re-route the file logger to the operator-supplied path now that
+    // command-line parsing has settled. initFileLogger() closes the
+    // bootstrap file before opening the new one.
+    {
+      std::string path = resolveLogFilePath();
+      initFileLogger(path.c_str());
+      vlog.info("File logger writing to %s", path.c_str());
+    }
 
     // - Run the server if required
     if (runServer) {
