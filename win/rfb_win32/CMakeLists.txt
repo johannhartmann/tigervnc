@@ -1,5 +1,9 @@
 add_library(rfb_win32 STATIC
   AboutDialog.cxx
+  CaptureBackend.cxx
+  CaptureBackendDxgi.cxx
+  CaptureBackendGdi.cxx
+  CaptureBackendWgc.cxx
   Clipboard.cxx
   CurrentUser.cxx
   DeviceContext.cxx
