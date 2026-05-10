@@ -7,7 +7,7 @@ adaptive **encoding policy** module that's been added to centralise
 those decisions, the **operator-facing presets** that tune them, and
 the **diagnostics** that surface what the server actually picked.
 
-## Status (this PR)
+## Status
 
 | Item | Status |
 |---|---|
@@ -15,43 +15,49 @@ the **diagnostics** that surface what the server actually picked.
 | `Preset` enum + `tuningFor()` (LANCrisp / Balanced / LowBandwidth / VideoOptimized / Custom) | ✓ |
 | `Diagnostics` counters and `diagnosticsSummary()` | ✓ |
 | GTest coverage of the decision logic | ✓ (17 cases) |
-| `core::EnumParameter "EncodingPreset"` registered with global Configuration | ✓ |
-| `EncodeManager` consumes the policy per rectangle (observational) | ✓ |
-| `EncodeManager` applies preset's quality / compression to existing classic encoders | ✓ |
+| `core::EnumParameter "EncodingPreset"` + `PolicyLogInterval` | ✓ |
+| `EncodeManager` consumes the policy per rectangle | ✓ |
+| `EncodeManager` applies preset's quality / compression knobs | ✓ |
 | `Diagnostics::bytes` and `encodeTimeUs` populated per rect | ✓ |
 | Connection-wide `recentChangeFps` derivation feeds the H.264 gate | ✓ |
 | Periodic mid-connection summary via `PolicyLogInterval` | ✓ |
 | Closing summary in `EncodeManager::logStats()` | ✓ |
-| Server-side **H.264 encoder** | not yet implemented |
+| **Server-side H.264 encoder on Windows (Media Foundation)** | **✓** |
+| Server-side H.264 encoder on Linux | ⚠ gap (libav-based encoder not wired) |
+| Server-side H.264 encoder on macOS | ⚠ gap (no libav build by default + no VideoToolbox encoder) |
 
-The framework is now end-to-end wired. The policy runs per rectangle,
-the existing classic encoders honour preset quality / compression
-overrides, and `logStats()` surfaces the counters at connection close
-(or whenever it's invoked). The H.264 branch of the policy still
-results in a fallback to TightJPEG because no server-side H.264
-encoder exists yet -- that's the only remaining gap before
-`fallbacks=0` is achievable on workloads where the policy chose H.264.
+## H.264 status by platform
 
-## H.264, honestly
+**Windows: shipping.** `H264WinEncoderContext` wraps the Media
+Foundation H.264 encoder MFT (`CLSID_CMSH264EncoderMFT`). One stateful
+encoder context per rect coordinates, NV12 input, Annex-B byte-stream
+output, ICodecAPI low-latency + CBR rate-control configuration. Force-
+keyframe every 60 frames for resilience. Both x64 and ARM64 build the
+encoder and ship it. Picked when:
 
-Upstream TigerVNC's H.264 code is **decoder-only**. The server has no
-H.264 encoder, on any platform. The `Decoder.cxx` path that
-instantiates `H264Decoder` covers viewers connecting to non-TigerVNC
-servers that happen to send `encodingH264 (50)`. The
-`HAVE_H264 / H264_LIBS=WIN` build flags wire up the Media Foundation
-**decoder** for the Windows viewer.
+- `EncodingPreset` resolves to `LowBandwidth` or `VideoOptimized`
+  (`tuningFor(preset).h264Enabled == true`), AND
+- the client advertised `encodingH264 (50)` in `SetEncodings`.
 
-So as of this PR:
+When both gates pass, `prepareEncoders()` routes the FullColour slot
+to the H.264 encoder; indexed/bitmap rects keep going to Tight (which
+amortises better at small palettes). Cursor + small UI updates flow
+through the existing classic encoders, unchanged.
 
-- The policy can **return** `RecommendedEncoder::H264` when the preset
-  enables it, the client supports it, and the rect is large + moving.
-- `EncodeManager` has no H.264 path to call. The future server-side
-  encoder (Media Foundation H.264 on Windows, libav on Linux/Mac) is a
-  separate, substantial effort — comparable to the DXGI capture work.
-- When the policy says "H.264" and `EncodeManager` falls back to
-  TightJPEG (or whatever it would have picked), the diagnostics
-  helper records a `fallback`. When the server-side encoder ships,
-  `fallbacks` should drop to zero on the relevant connections.
+**Linux: gap.** The decoder side has libav (`H264LibavDecoderContext`)
+but no encoder context exists. Adding one would mean: open libav with
+`AV_CODEC_ID_H264`, bind a `libx264` or `libopenh264` encoder,
+allocate `AVFrame` for NV12 input, encode + drain `AVPacket`s. Roughly
+the same shape as `H264LibavDecoderContext.cxx` but in the encode
+direction. `H264EncoderContext::createContext` returns nullptr today,
+so any H.264 recommendation on a Linux server falls back to TightJPEG
+and ticks the `Diagnostics::fallbacks` counter.
+
+**macOS: gap.** Upstream TigerVNC doesn't build libav for macOS by
+default (the CMake `find_package(AVCodec)` is best-effort). Adding a
+VideoToolbox encoder context (the native Apple H.264 encoder) is the
+right path long-term but is out of scope for this fork's
+Windows-focused modernization.
 
 ## Presets
 
@@ -173,21 +179,23 @@ log volume low.
 - The policy does **not** cache decisions. `EncodeManager` already
   caches by region; adding a second cache layer would not help.
 
-## Follow-up work (not in this PR)
+## Follow-up work
 
-The remaining gap is the big one:
+All four originally-listed gaps are now closed in this PR. Remaining
+follow-ups are platform expansions and optimisations:
 
-1. **Server-side H.264 encoder.** `H264Encoder` class implementing
-   the `Encoder` interface + `H264WinEncoderContext` (Media Foundation
-   H.264 encoder, separate from the existing decoder) + libav encoder
-   fallback for Linux/Mac, BGRA → NV12 colour conversion, frame
-   submission, GOP / keyframe / bitrate control, lifecycle integration
-   with `EncodeManager`. Once this lands, `prepareEncoders()` will
-   route to `H264Encoder` when the policy recommends H.264 and the
-   `fallbacks` counter should drop to zero on workloads where the
-   policy chose H.264. Multi-PR effort comparable to the DXGI capture
-   work already merged.
-
-The other three follow-ups (recent-change-rate signal, per-frame
-timing in Diagnostics, periodic mid-connection log) all landed in
-this PR.
+1. **Linux server-side H.264 encoder** (libav-based). Mirror
+   `H264LibavDecoderContext` in the encode direction:
+   `avcodec_find_encoder(AV_CODEC_ID_H264)` + NV12 input + drain
+   `AVPacket`s. Wire from `H264EncoderContext::createContext` when
+   `H264_LIBS=LIBAV`. Pre-existing libav build infrastructure makes
+   this a moderate effort.
+2. **macOS server-side H.264 encoder.** VideoToolbox encoder (native
+   Apple HW path) + a CMake gating block.
+3. **Hardware-accelerated D3D11 NV12 path on Windows.** The encoder
+   today converts BGRA → NV12 on the CPU. A D3D11 shader-based
+   converter would land it in GPU memory; worth doing only if
+   profiling shows the CPU path is the bottleneck.
+4. **Adaptive bitrate.** The encoder is pinned at 8 Mbps. Tying the
+   bitrate to the connection's `Congestion` estimator would make the
+   `LowBandwidth` preset deliver on its bitrate cap.

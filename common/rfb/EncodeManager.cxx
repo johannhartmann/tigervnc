@@ -45,6 +45,9 @@
 #include <rfb/ZRLEEncoder.h>
 #include <rfb/TightEncoder.h>
 #include <rfb/TightJPEGEncoder.h>
+#ifdef HAVE_H264
+#include <rfb/H264Encoder.h>
+#endif
 
 using namespace rfb;
 
@@ -96,6 +99,7 @@ enum EncoderClass {
   encoderTightJPEG,
   encoderZRLE,
   encoderJPEG,
+  encoderH264,
   encoderClassMax,
 };
 
@@ -133,6 +137,8 @@ static const char *encoderClassName(EncoderClass klass)
     return "ZRLE";
   case encoderJPEG:
     return "JPEG";
+  case encoderH264:
+    return "H.264";
   case encoderClassMax:
     break;
   }
@@ -177,6 +183,14 @@ EncodeManager::EncodeManager(SConnection* conn_)
   encoders[encoderTightJPEG] = new TightJPEGEncoder(conn);
   encoders[encoderZRLE] = new ZRLEEncoder(conn);
   encoders[encoderJPEG] = new JPEGEncoder(conn);
+#ifdef HAVE_H264
+  encoders[encoderH264] = new H264Encoder(conn);
+#else
+  // Reuse Raw as a placeholder so encoders[] stays fully populated.
+  // Routing logic checks supported() before dispatching, so this slot
+  // is never selected on builds without H.264.
+  encoders[encoderH264] = new RawEncoder(conn);
+#endif
 
   updates = 0;
   lastRectBytes = 0;
@@ -292,6 +306,14 @@ bool EncodeManager::supported(int encoding)
   case encodingZRLE:
   case encodingTight:
     return true;
+#ifdef HAVE_H264
+  case encodingH264:
+    // Server-side encoding only on Windows for now; H264Encoder::
+    // isSupported() returns false on Linux/Mac builds. We still
+    // advertise the encoding here -- the per-encoder isSupported()
+    // call gates the actual usage.
+    return true;
+#endif
   default:
     return false;
   }
@@ -463,14 +485,14 @@ void EncodeManager::prepareEncoders(bool allowLossy)
   // whatever the client requested via SetEncodings.
   encoding::Preset preset = encoding::Preset::Custom;
   encoding::parsePreset(encodingPreset.getValueStr().c_str(), &preset);
+  encoding::PresetTuning tuning = encoding::tuningFor(preset);
   if (preset != encoding::Preset::Custom) {
-    encoding::PresetTuning t = encoding::tuningFor(preset);
     // tuningFor stores JPEG quality on a 0..100 scale; ClientParams
     // uses 0..9. Rescale via floor(q/10) clamped to [0,9].
-    int q9 = t.jpegQuality / 10;
+    int q9 = tuning.jpegQuality / 10;
     if (q9 < 0) q9 = 0;
     if (q9 > 9) q9 = 9;
-    int c9 = t.tightCompression;
+    int c9 = tuning.tightCompression;
     if (c9 < 0) c9 = 0;
     if (c9 > 9) c9 = 9;
     conn->client.qualityLevel  = q9;
@@ -521,6 +543,18 @@ void EncodeManager::prepareEncoders(bool allowLossy)
       solid = bitmap = bitmapRLE = encoderTightJPEG;
       indexed = indexedRLE = fullColour = encoderTightJPEG;
     }
+  }
+
+  // H.264 routing. When the active preset enables H.264 and the client
+  // advertised the encoding, route full-colour rects (the photo /
+  // video content; indexed and bitmap rects keep going to Tight which
+  // amortises better at small palettes) to the H.264 encoder. The
+  // encoder maintains a stateful per-region context so consecutive
+  // updates emit P-frames; small / occasional rects naturally pay
+  // the keyframe cost and fall back to TightJPEG-style results.
+  if (allowLossy && tuning.h264Enabled &&
+      encoders[encoderH264]->isSupported()) {
+    fullColour = encoderH264;
   }
 
   // Can't use lossy encoders for lossless refresh
@@ -1076,6 +1110,7 @@ void EncodeManager::writeSubRect(const core::Rect& rect,
       case encoderTightJPEG:
       case encoderJPEG:      used = encoding::RecommendedEncoder::TightJPEG; break;
       case encoderZRLE:      used = encoding::RecommendedEncoder::ZRLE;      break;
+      case encoderH264:      used = encoding::RecommendedEncoder::H264;      break;
       default:               used = encoding::RecommendedEncoder::Auto;      break;
     }
     encoding::recordFrame(&encodingDiag, used,
