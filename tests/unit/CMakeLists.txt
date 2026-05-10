@@ -52,3 +52,7 @@ gtest_discover_tests(emulatemb)
 add_executable(capturerectcoalesce capturerectcoalesce.cxx)
 target_link_libraries(capturerectcoalesce rfb GTest::gtest_main)
 gtest_discover_tests(capturerectcoalesce)
+
+add_executable(encodingpolicy encodingpolicy.cxx)
+target_link_libraries(encodingpolicy rfb GTest::gtest_main)
+gtest_discover_tests(encodingpolicy)
