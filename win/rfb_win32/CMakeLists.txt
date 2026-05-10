@@ -39,3 +39,8 @@ if(BUILD_WINVNC)
 endif()
 
 target_link_libraries(rfb_win32 user32.lib comctl32.lib wtsapi32.lib version.lib)
+# DXGI Desktop Duplication backend. Both libs are present in every
+# MinGW / MSYS2 toolchain that targets Windows; the actual API surface
+# is gated by _WIN32_WINNT inside CaptureBackendDxgi.cxx, so the link
+# is harmless on legacy builds (no symbols referenced).
+target_link_libraries(rfb_win32 d3d11 dxgi)
