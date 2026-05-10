@@ -949,6 +949,19 @@ void EncodeManager::writeRects(const core::Region& changed,
   std::vector<core::Rect> rects;
   std::vector<core::Rect>::const_iterator rect;
 
+  // The classic encoders' SubRect splitting (max 65536 area, max 2048
+  // wide) is great for Tight / JPEG / ZRLE -- they amortise per-rect
+  // setup over small chunks. H.264 is the opposite: each rect spawns
+  // its own MFT instance, encoding setup amortises across the whole
+  // rect, and the MFT rejects very narrow strips with
+  // MF_E_INVALIDMEDIATYPE. When H.264 is the active full-colour
+  // encoder we skip the split -- per-rect palette analysis still
+  // routes indexed content to Tight, and writeSubRect's size gate
+  // catches truecolour rects too small for the encoder.
+  bool h264FullColour =
+      activeEncoders[encoderFullColour] == encoderH264 &&
+      encoders[encoderH264]->isSupported();
+
   changed.get_rects(&rects);
   for (rect = rects.begin(); rect != rects.end(); ++rect) {
     int w, h, sw, sh;
@@ -958,7 +971,8 @@ void EncodeManager::writeRects(const core::Region& changed,
     h = rect->height();
 
     // No split necessary?
-    if (((w*h) < SubRectMaxArea) && (w < SubRectMaxWidth)) {
+    if (h264FullColour ||
+        (((w*h) < SubRectMaxArea) && (w < SubRectMaxWidth))) {
       writeSubRect(*rect, pb);
       continue;
     }
@@ -1062,6 +1076,32 @@ void EncodeManager::writeSubRect(const core::Rect& rect,
       type = encoderIndexed;
   }
 
+  // Per-rect H.264 size gate. The Media Foundation H.264 encoder MFT
+  // rejects very small frame sizes with MF_E_INVALIDMEDIATYPE; below
+  // the threshold the H264Encoder would emit an empty payload and the
+  // viewer would lose those pixels. Route small rects to a classic
+  // lossy encoder instead by temporarily swapping the FullColour
+  // dispatch slot for this rect only.
+  //
+  // 64 px is conservative -- empirically, height >= 56 succeeds and
+  // height <= 32 fails on the bundled software MFT; 64 leaves margin
+  // for hardware encoders that may have larger minimums.
+  static const int kH264MinDim = 64;
+  int swappedSlot = -1;
+  int savedKlass = -1;
+  if (type == encoderFullColour &&
+      activeEncoders[encoderFullColour] == encoderH264 &&
+      (rect.width() < kH264MinDim || rect.height() < kH264MinDim)) {
+    swappedSlot = encoderFullColour;
+    savedKlass = activeEncoders[swappedSlot];
+    if (encoders[encoderTightJPEG]->isSupported())
+      activeEncoders[swappedSlot] = encoderTightJPEG;
+    else if (encoders[encoderTight]->isSupported())
+      activeEncoders[swappedSlot] = encoderTight;
+    else
+      activeEncoders[swappedSlot] = encoderRaw;
+  }
+
   encoder = startRect(rect, type);
 
   if (encoder->flags & EncoderUseNativePF)
@@ -1070,6 +1110,10 @@ void EncodeManager::writeSubRect(const core::Rect& rect,
   encoder->writeRect(ppb, info.palette);
 
   endRect();
+
+  // Restore the dispatch slot if we swapped it for the H.264 size gate.
+  if (swappedSlot >= 0)
+    activeEncoders[swappedSlot] = savedKlass;
 
   // Adaptive-policy diagnostics. Observational only -- the EncoderClass
   // we just used was picked by the existing heuristic above; we ask the
