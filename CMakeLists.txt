@@ -191,7 +191,9 @@ if(ENABLE_H264)
   if(WIN32)
     add_definitions("-DHAVE_H264")
     set(H264_LIBS "WIN")  # may be LIBAV in the future
-    set(H264_LIBRARIES ole32 mfplat mfuuid wmcodecdspuuid)
+    # strmiids supplies IID_ICodecAPI (used by the server-side encoder
+    # to set MF_AVENC* low-latency / bitrate knobs).
+    set(H264_LIBRARIES ole32 mfplat mfuuid wmcodecdspuuid strmiids)
 
     set(CMAKE_REQUIRED_LIBRARIES ${H264_LIBRARIES})
     check_variable_exists(CLSID_VideoProcessorMFT HAVE_VIDEO_PROCESSOR_MFT)
