@@ -64,10 +64,17 @@ target_link_libraries(rfb ${JPEG_LIBRARIES} ${PIXMAN_LIBRARIES})
 
 if(ENABLE_H264 AND NOT H264_LIBS STREQUAL "NONE")
   target_sources(rfb PRIVATE H264Decoder.cxx H264DecoderContext.cxx)
+  # Server-side encoder. Always builds; the platform-specific context
+  # is gated below. On platforms without an encoder backend the factory
+  # returns nullptr and EncodeManager falls back to a classic encoder.
+  target_sources(rfb PRIVATE H264Encoder.cxx H264EncoderContext.cxx)
   if(H264_LIBS STREQUAL "LIBAV")
     target_sources(rfb PRIVATE H264LibavDecoderContext.cxx)
+    # Server-side libav H.264 encoder is a known gap; see
+    # doc/encoding-policy.md.
   elseif(H264_LIBS STREQUAL "WIN")
-    target_sources(rfb PRIVATE H264WinDecoderContext.cxx)
+    target_sources(rfb PRIVATE H264WinDecoderContext.cxx
+                               H264WinEncoderContext.cxx)
   endif()
   target_include_directories(rfb SYSTEM PUBLIC ${H264_INCLUDE_DIRS})
   target_link_libraries(rfb ${H264_LIBRARIES})
