@@ -26,11 +26,15 @@
 #include <rfb_win32/CaptureBackendGdi.h>
 #include <rfb_win32/CaptureBackendWgc.h>
 
+#include <core/Configuration.h>
 #include <core/LogWriter.h>
 
 #include <windows.h>
+// shellscalingapi.h is Win 8.1+; we resolve GetDpiForMonitor via
+// GetProcAddress instead so the legacy build profile still compiles.
 
 #include <cstring>
+#include <set>
 #include <string>
 
 namespace rfb {
@@ -40,6 +44,18 @@ namespace capture {
 static core::LogWriter vlog("CaptureBackend");
 
 BackendKind configuredBackendKind = BackendKind::Auto;
+
+// User-facing knob. winvnc / vncconfig pick this up via the standard
+// Configuration plumbing; SDisplay reads it in phase 3 when it actually
+// switches to consume CaptureBackend. Until then, setting this changes
+// the factory's selection but doesn't affect the running capture path.
+namespace {
+core::EnumParameter captureBackendParam(
+    "CaptureBackend",
+    "Windows screen capture backend (auto, dxgi, wgc, gdi). 'auto' "
+    "tries dxgi first, then wgc, then falls back to gdi.",
+    {"auto", "dxgi", "wgc", "gdi"}, "auto");
+}  // namespace
 
 // -=- Naming -----------------------------------------------------------
 
@@ -105,6 +121,33 @@ const char* captureStatusName(CaptureStatus s) {
 
 namespace {
 
+// MDT_EFFECTIVE_DPI = 0 in shellscalingapi.h; we redeclare locally so we
+// don't need that header on legacy builds.
+constexpr UINT kMdtEffectiveDpi = 0;
+typedef HRESULT (WINAPI *GetDpiForMonitor_t)(HMONITOR, UINT, UINT*, UINT*);
+
+GetDpiForMonitor_t loadGetDpiForMonitor() {
+  // Resolved once per process. Returns nullptr on Windows 8 or older,
+  // where GetDpiForMonitor doesn't exist; callers fall back to 96 DPI.
+  static GetDpiForMonitor_t fn = []() -> GetDpiForMonitor_t {
+    HMODULE m = LoadLibraryW(L"shcore.dll");
+    if (!m) return nullptr;
+    return reinterpret_cast<GetDpiForMonitor_t>(
+        GetProcAddress(m, "GetDpiForMonitor"));
+  }();
+  return fn;
+}
+
+int rotationFromDmDisplayOrientation(DWORD orient) {
+  switch (orient) {
+    case DMDO_DEFAULT: return 0;
+    case DMDO_90:      return 90;
+    case DMDO_180:     return 180;
+    case DMDO_270:     return 270;
+    default:           return 0;
+  }
+}
+
 struct EnumCtx {
   std::vector<MonitorInfo>* out;
   int nextIndex;
@@ -123,10 +166,30 @@ BOOL CALLBACK enumProc(HMONITOR hMon, HDC, LPRECT, LPARAM lParam) {
   info.deviceName = mi.szDevice;  // \\.\DISPLAY1 etc.
   info.virtualRect = core::Rect(mi.rcMonitor.left, mi.rcMonitor.top,
                                 mi.rcMonitor.right, mi.rcMonitor.bottom);
-  info.dpiX = 96;   // DPI lookup deferred to phase 2 (GetDpiForMonitor
-  info.dpiY = 96;   // is Win 8.1+ and needs runtime resolution under
-                    // the legacy build profile)
-  info.rotationDegrees = 0;  // EnumDisplaySettings query also deferred
+
+  // DPI: Win 8.1+ via GetDpiForMonitor. Older builds report 96/96 like
+  // GDI's stretch behaviour assumes.
+  info.dpiX = 96;
+  info.dpiY = 96;
+  if (auto getDpi = loadGetDpiForMonitor()) {
+    UINT dx = 96, dy = 96;
+    if (SUCCEEDED(getDpi(hMon, kMdtEffectiveDpi, &dx, &dy))) {
+      info.dpiX = static_cast<int>(dx);
+      info.dpiY = static_cast<int>(dy);
+    }
+  }
+
+  // Rotation: EnumDisplaySettingsExA against the device name.
+  info.rotationDegrees = 0;
+  DEVMODEA dm = {};
+  dm.dmSize = sizeof(dm);
+  if (EnumDisplaySettingsExA(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm,
+                             EDS_ROTATEDMODE) &&
+      (dm.dmFields & DM_DISPLAYORIENTATION)) {
+    info.rotationDegrees =
+        rotationFromDmDisplayOrientation(dm.dmDisplayOrientation);
+  }
+
   info.isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
 
   ctx->out->push_back(info);
@@ -189,25 +252,41 @@ std::unique_ptr<CaptureBackend> tryBackend(BackendKind k) {
 
 }  // namespace
 
+// Read the configured backend kind: factory caller's argument wins, then
+// the configuredBackendKind global (set programmatically), then the
+// CaptureBackend EnumParameter (set by config / CLI / registry).
+BackendKind resolveConfiguredKind(BackendKind callerArg) {
+  if (callerArg != BackendKind::Auto)
+    return callerArg;
+  if (configuredBackendKind != BackendKind::Auto)
+    return configuredBackendKind;
+  std::string v = captureBackendParam.getValueStr();
+  BackendKind k = BackendKind::Auto;
+  parseBackendKind(v.c_str(), &k);
+  return k;
+}
+
 std::unique_ptr<CaptureBackend>
 makeCaptureBackend(BackendKind preferred, BackendKind* resolved) {
-  // Caller asked for a specific backend: try it first. If it returns
-  // NotSupported, fall through to auto. If it returns Error, surface it
-  // by trying auto next anyway -- we'd rather degrade gracefully than
-  // strand the server.
-  if (preferred != BackendKind::Auto) {
-    if (auto b = tryBackend(preferred)) {
+  BackendKind effective = resolveConfiguredKind(preferred);
+
+  // Caller asked for a specific backend (directly or via config): try
+  // it first. If it returns NotSupported, fall through to auto. If it
+  // returns Error, surface it by trying auto next anyway -- we'd rather
+  // degrade gracefully than strand the server.
+  if (effective != BackendKind::Auto) {
+    if (auto b = tryBackend(effective)) {
       if (resolved) *resolved = b->info().kind;
       return b;
     }
     vlog.error("Preferred capture backend %s unavailable; falling back",
-               backendKindName(preferred));
+               backendKindName(effective));
   }
 
   // Auto: DXGI -> WGC -> GDI.
   for (BackendKind k :
        {BackendKind::Dxgi, BackendKind::Wgc, BackendKind::Gdi}) {
-    if (preferred != BackendKind::Auto && k == preferred)
+    if (effective != BackendKind::Auto && k == effective)
       continue;  // already tried above
     if (auto b = tryBackend(k)) {
       if (resolved) *resolved = b->info().kind;
