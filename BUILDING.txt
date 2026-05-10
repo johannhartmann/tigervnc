@@ -69,16 +69,58 @@ Build requirements (Unix)
 Build requirements (Windows)
 ============================
 
--- MinGW or MinGW-w64
+Supported Windows hosts and targets
+-----------------------------------
 
--- Inno Setup (needed to build the TigerVNC installer)
-   Inno Setup can be downloaded from http://www.jrsoftware.org/isinfo.php.
-   You also need the Inno Setup Preprocessor, which is available in the
-   Inno Setup QuickStart Pack.
+TigerVNC for Windows targets the Windows 10 (1507) API surface
+unconditionally. Supported deployment targets:
 
-   Add the directory containing iscc.exe (for instance, 
-   C:\Program Files\Inno Setup 5) to the system or user PATH environment
-   variable prior to building TigerVNC.
+  * Windows 10 / 11 (x64 and ARM64)
+  * Windows Server 2016, 2019, 2022, 2025 (x64)
+
+Pre-Windows-10 hosts (Win 7 / Server 2008 R2 etc.) are no longer
+supported; the .iss installer carries MinVersion=10.0 and refuses to
+run on older systems. Downstreams that still need pre-Win10 support
+should fork.
+
+
+Toolchains
+----------
+
+Supported (exercised by upstream CI):
+
+-- MSYS2 MINGW64 environment for x64 builds.
+   Provides a GCC-based mingw-w64 toolchain plus all required runtime
+   libraries (FLTK 1.3.x, GnuTLS, libjpeg-turbo, pixman, zlib, ...).
+
+-- MSYS2 CLANGARM64 environment for ARM64 builds.
+   Provides an LLVM-MinGW (clang) aarch64-w64-windows-gnu toolchain.
+   This is the only viable mingw-style ARM64 Windows toolchain; main-
+   line mingw-w64 GCC does not produce ARM64 binaries.
+
+Experimental / unsupported:
+
+-- MSVC (Visual Studio) is not supported. The build uses GCC/Clang-only
+   compiler flags and CMakeLists.txt fails fast with FATAL_ERROR if MSVC
+   is selected.
+
+-- Standalone MinGW (non-MSYS2) installs may work if the package set
+   below is available, but only MSYS2 environments are tested.
+
+
+Other build dependencies
+------------------------
+
+-- Inno Setup 6.3 or later.
+   Required to build the .exe installer. Downloadable from
+   https://jrsoftware.org/isinfo.php. Add the directory containing
+   ISCC.exe (e.g. C:\Program Files\Inno Setup 6) to PATH before
+   invoking `make installer` or `cmake --build . --target installer`.
+
+-- For ARM64 hosts: ISCC.exe is a 32-bit binary and runs under x86
+   emulation. The installer it produces is native ARM64 either way --
+   architecture is selected by ArchitecturesAllowed= in the .iss
+   templates, not by the host running ISCC.
 
 
 =========================
@@ -376,6 +418,54 @@ MinGW build on Linux
     -DCMAKE_RANLIB={mingw_binary_path}/x86_64-w64-mingw32-ranlib \
     {source_directory}
   make
+
+
+Native x64 build on Windows via MSYS2 (MINGW64)
+------------------------------------------------
+
+  Open the "MSYS2 MINGW64" shell, then:
+
+    pacman -S --needed --noconfirm \
+      mingw-w64-x86_64-toolchain \
+      mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
+      mingw-w64-x86_64-pkgconf \
+      mingw-w64-x86_64-zlib mingw-w64-x86_64-pixman \
+      mingw-w64-x86_64-libjpeg-turbo \
+      mingw-w64-x86_64-fltk1.3 \
+      mingw-w64-x86_64-gnutls mingw-w64-x86_64-nettle
+
+    cd {build_directory}
+    cmake -G Ninja -DCMAKE_BUILD_TYPE=Release {source_directory}
+    cmake --build .
+    cmake --build . --target installer winvnc_installer
+
+
+Native ARM64 build on Windows via MSYS2 (CLANGARM64)
+-----------------------------------------------------
+
+  Open the "MSYS2 CLANG ARM64" shell on a Windows-on-ARM host, then:
+
+    pacman -S --needed --noconfirm \
+      mingw-w64-clang-aarch64-toolchain \
+      mingw-w64-clang-aarch64-cmake mingw-w64-clang-aarch64-ninja \
+      mingw-w64-clang-aarch64-pkgconf \
+      mingw-w64-clang-aarch64-zlib mingw-w64-clang-aarch64-pixman \
+      mingw-w64-clang-aarch64-libjpeg-turbo \
+      mingw-w64-clang-aarch64-fltk1.3 \
+      mingw-w64-clang-aarch64-gnutls mingw-w64-clang-aarch64-nettle
+
+    cd {build_directory}
+    cmake -G Ninja -DCMAKE_BUILD_TYPE=Release {source_directory}
+    cmake --build .
+    cmake --build . --target installer winvnc_installer
+
+  Cross-compiling ARM64 binaries from an x64 Windows host is possible
+  with llvm-mingw (https://github.com/mstorsjo/llvm-mingw) but is not
+  exercised by upstream CI.
+
+  The CLANGARM64 environment uses an LLVM-MinGW (clang) toolchain
+  targeting aarch64-w64-windows-gnu. Mainline mingw-w64 GCC does not
+  emit ARM64 code; do not substitute mingw-w64-x86_64-toolchain here.
 
 
 ===============================
