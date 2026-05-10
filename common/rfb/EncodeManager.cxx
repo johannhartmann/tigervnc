@@ -65,6 +65,13 @@ core::EnumParameter EncodeManager::encodingPreset(
   {"LANCrisp", "Balanced", "LowBandwidth", "VideoOptimized", "Custom"},
   "Custom");
 
+core::IntParameter EncodeManager::policyLogInterval(
+  "PolicyLogInterval",
+  "Emit an adaptive-policy diagnostics summary line every N frames "
+  "during a live connection (0 disables; summary still appears once at "
+  "connection close via logStats()).",
+  500);
+
 // Split each rectangle into smaller ones no larger than this area,
 // and no wider than this width.
 static const int SubRectMaxArea = 65536;
@@ -172,6 +179,10 @@ EncodeManager::EncodeManager(SConnection* conn_)
   encoders[encoderJPEG] = new JPEGEncoder(conn);
 
   updates = 0;
+  lastRectBytes = 0;
+  lastRectEncodeUs = 0;
+  currentChangeFps = 0;
+  framesSinceLastPolicyLog = 0;
   memset(&copyStats, 0, sizeof(copyStats));
   encoding::resetDiagnostics(&encodingDiag);
   stats.resize(encoderClassMax);
@@ -319,12 +330,44 @@ void EncodeManager::forceRefresh(const core::Region& req)
 void EncodeManager::writeUpdate(const UpdateInfo& ui, const PixelBuffer* pb,
                                 const RenderedCursor* renderedCursor)
 {
+  // Maintain a 1-second sliding window of update batch timestamps so
+  // currentChangeFps reflects "how many distinct update batches the
+  // connection has produced in the last second". Cheap proxy for "is
+  // this a busy / video-like workload?" -- the encoding policy gates
+  // its H.264 recommendation on it.
+  if (!ui.changed.is_empty() || !ui.copied.is_empty()) {
+    uint64_t nowMs = (uint64_t)std::chrono::duration_cast<
+        std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    recentUpdateTimesMs.push_back(nowMs);
+    while (!recentUpdateTimesMs.empty() &&
+           recentUpdateTimesMs.front() + 1000 < nowMs) {
+      recentUpdateTimesMs.pop_front();
+    }
+    currentChangeFps = (int)recentUpdateTimesMs.size();
+  }
+
   doUpdate(true, ui.changed, ui.copied, ui.copy_delta, pb, renderedCursor);
 
   recentlyChangedRegion.assign_union(ui.changed);
   recentlyChangedRegion.assign_union(ui.copied);
   if (!recentChangeTimer.isStarted())
     recentChangeTimer.start(RecentChangeTimeout);
+
+  // Mid-connection diagnostics summary every N frames (0 disables).
+  // Counted at update-batch granularity so the cadence matches user
+  // perception of "frames" rather than per-rect.
+  framesSinceLastPolicyLog++;
+  int interval = (int)policyLogInterval;
+  if (interval > 0 &&
+      (int)framesSinceLastPolicyLog >= interval &&
+      encodingDiag.totalFrames > 0) {
+    vlog.info("Policy: %s (preset=%s, recentFps=%d)",
+              encoding::diagnosticsSummary(encodingDiag).c_str(),
+              encodingPreset.getValueStr().c_str(),
+              currentChangeFps);
+    framesSinceLastPolicyLog = 0;
+  }
 }
 
 void EncodeManager::writeLosslessRefresh(const core::Region& req,
@@ -674,6 +717,7 @@ Encoder* EncodeManager::startRect(const core::Rect& rect, int type)
   klass = activeEncoders[activeType];
 
   beforeLength = conn->getOutStream()->length();
+  rectStartTime = std::chrono::steady_clock::now();
 
   stats[klass][activeType].rects++;
   stats[klass][activeType].pixels += rect.area();
@@ -705,6 +749,10 @@ void EncodeManager::endRect()
   conn->writer()->endRect();
 
   length = conn->getOutStream()->length() - beforeLength;
+  lastRectBytes = length;
+  lastRectEncodeUs = (uint64_t)std::chrono::duration_cast<
+      std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - rectStartTime).count();
 
   klass = activeEncoders[activeType];
   stats[klass][activeType].bytes += length;
@@ -1008,7 +1056,7 @@ void EncodeManager::writeSubRect(const core::Rect& rect,
                                 ? 257
                                 : (int)info.palette.size();
     rectStats.hasGradient  = (type == encoderFullColour);
-    rectStats.recentChangeFps = 0;  // TODO: derive from recentlyChangedRegion
+    rectStats.recentChangeFps = currentChangeFps;
 
     encoding::ClientCaps caps{};
     caps.supportsH264      = conn->client.supportsEncoding(encodingH264);
@@ -1030,8 +1078,9 @@ void EncodeManager::writeSubRect(const core::Rect& rect,
       case encoderZRLE:      used = encoding::RecommendedEncoder::ZRLE;      break;
       default:               used = encoding::RecommendedEncoder::Auto;      break;
     }
-    encoding::recordFrame(&encodingDiag, used, /*bytes=*/0,
-                          /*encodeTimeUs=*/0);
+    encoding::recordFrame(&encodingDiag, used,
+                          (uint64_t)(lastRectBytes > 0 ? lastRectBytes : 0),
+                          lastRectEncodeUs);
     if (rec == encoding::RecommendedEncoder::H264 &&
         used != encoding::RecommendedEncoder::H264) {
       encoding::recordFallback(&encodingDiag, rec, used);
